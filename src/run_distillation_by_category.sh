@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Simple Distillation Runner with Logging
+# Usage: ./run_distillation_by_category.sh <category1> [category2] ...
+# Example: ./run_distillation_by_category.sh Baby_Products
+# Or with custom params: LR=1e-4 NUM_EPOCHS=10 ./run_distillation_simple.sh Baby_Products
+
+# Configuration
+MODEL_NAME="${MODEL_NAME:-llava-hf/llava-v1.6-mistral-7b-hf}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-./out_distilled}"
+LR="${LR:-5e-5}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-1e-5}"
+NUM_EPOCHS="${NUM_EPOCHS:-5}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
+
+# Get script directory
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SRC_DIR}"
+
+# Create logs directory
+LOGS_DIR="./logs"
+mkdir -p "${LOGS_DIR}"
+
+# If no categories provided, use all subdirectories in ../data/
+if [ "$#" -eq 0 ]; then
+    echo "[ERROR] Please provide at least one category as argument."
+    echo "Usage: ./run_distillation_simple.sh <category1> [category2] ..."
+    echo "Example: ./run_distillation_simple.sh Baby_Products"
+    exit 1
+fi
+
+# Process each category
+for category in "$@"; do
+    echo ""
+    echo "============================================"
+    echo "Starting distillation for: ${category}"
+    echo "============================================"
+    
+    # Setup paths
+    TRAIN_DATA="../data/item2meta_train_${category}.with_desc.json"
+    VAL_DATA="../data/item2meta_valid_${category}.with_desc.jsonl"
+    TRAIN_IMG_DIR="../data/train_images/${category}"
+    VAL_IMG_DIR="../data/valid_images/${category}"
+    OUTPUT_DIR="${OUTPUT_ROOT}/${category}"
+    
+    # Check if data files exist
+    if [ ! -f "${TRAIN_DATA}" ]; then
+        echo "[WARNING] Training data not found: ${TRAIN_DATA}, skipping."
+        continue
+    fi
+    
+    # Create output directory
+    mkdir -p "${OUTPUT_DIR}"
+    
+    # Setup log file with timestamp
+    TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+    LOG_FILE="${LOGS_DIR}/${category}_${TIMESTAMP}.log"
+    GPU_LOG_FILE="${LOGS_DIR}/${category}_${TIMESTAMP}_gpu.log"
+    
+    echo "Log file: ${LOG_FILE}"
+    echo "GPU log file: ${GPU_LOG_FILE}"
+    
+    # Log header
+    {
+        echo "======================================"
+        echo "Distillation Run: ${category}"
+        echo "Start Time: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "======================================"
+        echo ""
+        echo "Configuration:"
+        echo "  Model: ${MODEL_NAME}"
+        echo "  Learning Rate: ${LR}"
+        echo "  Weight Decay: ${WEIGHT_DECAY}"
+        echo "  Epochs: ${NUM_EPOCHS}"
+        echo "  Batch Size: ${BATCH_SIZE}"
+        echo "  Save LoRA per epoch: YES (default)"
+        echo ""
+        echo "Paths:"
+        echo "  Train Data: ${TRAIN_DATA}"
+        echo "  Val Data: ${VAL_DATA}"
+        echo "  Train Images: ${TRAIN_IMG_DIR}"
+        echo "  Val Images: ${VAL_IMG_DIR}"
+        echo "  Output: ${OUTPUT_DIR}"
+        echo ""
+    } | tee "${LOG_FILE}"
+    
+    # Function to monitor GPU in background
+    monitor_gpu() {
+        local gpu_log_file=$1
+        while true; do
+            {
+                echo "=== $(date '+%Y-%m-%d %H:%M:%S') ==="
+                nvidia-smi --query-gpu=utilization.gpu,utilization.memory,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null || echo "GPU monitoring unavailable"
+            } >> "${gpu_log_file}"
+            sleep 10
+        done
+    }
+    
+    # Start GPU monitoring in background (if nvidia-smi available)
+    GPU_MONITOR_PID=""
+    if command -v nvidia-smi &> /dev/null; then
+        monitor_gpu "${GPU_LOG_FILE}" &
+        GPU_MONITOR_PID=$!
+        echo "GPU monitoring started (PID: ${GPU_MONITOR_PID})" | tee -a "${LOG_FILE}"
+    fi
+    
+    # Build command
+    CMD="python3 knowledge_distillation.py"
+    CMD="${CMD} --train_data '${TRAIN_DATA}'"
+    CMD="${CMD} --val_data '${VAL_DATA}'"
+    CMD="${CMD} --train_images_dir '${TRAIN_IMG_DIR}'"
+    CMD="${CMD} --val_images_dir '${VAL_IMG_DIR}'"
+    CMD="${CMD} --output_dir '${OUTPUT_DIR}'"
+    CMD="${CMD} --model_name '${MODEL_NAME}'"
+    CMD="${CMD} --lr ${LR}"
+    CMD="${CMD} --weight_decay ${WEIGHT_DECAY}"
+    CMD="${CMD} --num_epochs ${NUM_EPOCHS}"
+    CMD="${CMD} --batch_size ${BATCH_SIZE}"
+    CMD="${CMD} --save_every_epoch"
+    CMD="${CMD} --log_perf"
+    
+    # Record start time
+    START_TIME=$(date +%s)
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Command:" | tee -a "${LOG_FILE}"
+    echo "${CMD}" | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+    
+    # Run training
+    if eval "${CMD}" 2>&1 | tee -a "${LOG_FILE}"; then
+        STATUS="SUCCESS"
+    else
+        STATUS="FAILED"
+    fi
+
+    # Append performance/metric files to the main log if present
+    if [ -d "${OUTPUT_DIR}" ]; then
+        for f in "${OUTPUT_DIR}"/forward_time_epoch_*.txt; do
+            if [ -f "$f" ]; then
+                echo "" | tee -a "${LOG_FILE}"
+                echo "---- Contents of $(basename "$f") ----" | tee -a "${LOG_FILE}"
+                cat "$f" | tee -a "${LOG_FILE}"
+            fi
+        done
+        for f in "${OUTPUT_DIR}"/val_metrics_epoch_*.txt; do
+            if [ -f "$f" ]; then
+                echo "" | tee -a "${LOG_FILE}"
+                echo "---- Contents of $(basename "$f") ----" | tee -a "${LOG_FILE}"
+                cat "$f" | tee -a "${LOG_FILE}"
+            fi
+        done
+        # Append params summary if present
+        params_file="${OUTPUT_DIR}/params_summary.txt"
+        if [ -f "${params_file}" ]; then
+            echo "" | tee -a "${LOG_FILE}"
+            echo "---- Contents of $(basename "${params_file}") ----" | tee -a "${LOG_FILE}"
+            cat "${params_file}" | tee -a "${LOG_FILE}"
+        fi
+    fi
+    
+    # Stop GPU monitoring
+    if [ -n "${GPU_MONITOR_PID}" ]; then
+        kill ${GPU_MONITOR_PID} 2>/dev/null || true
+    fi
+    
+    # Record end time and duration
+    END_TIME=$(date +%s)
+    DURATION=$((END_TIME - START_TIME))
+    DURATION_MIN=$((DURATION / 60))
+    DURATION_SEC=$((DURATION % 60))
+    
+    # Log summary
+    {
+        echo ""
+        echo "======================================"
+        echo "Run Summary"
+        echo "======================================"
+        echo "Category: ${category}"
+        echo "Status: ${STATUS}"
+        echo "Start Time: $(date -d @${START_TIME} '+%Y-%m-%d %H:%M:%S')"
+        echo "End Time: $(date -d @${END_TIME} '+%Y-%m-%d %H:%M:%S')"
+        echo "Duration: ${DURATION_MIN}m ${DURATION_SEC}s (${DURATION}s)"
+        echo "Output Directory: ${OUTPUT_DIR}"
+        echo "======================================"
+    } | tee -a "${LOG_FILE}"
+    
+    echo "✓ Distillation completed for ${category}"
+done
+
+echo ""
+echo "============================================"
+echo "All categories processed!"
+echo "Logs saved in: ${LOGS_DIR}/"
+echo "============================================"
