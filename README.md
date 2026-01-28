@@ -16,27 +16,24 @@ pip install -r requirements.txx
 ```
 
 ## Data preparation
+Step1 and Step2 are optional, if you want to rerun everything. You can use them. Or it's unnecessary.
 ```bash
 cd src/scripts
-python step1_build_item2meta_and_category.py --<category>
- 
-cd ..
+Optional: python step1_build_item2meta_and_category.py --<category>
 python crawl_images_per_cate.py --<category>
-
-cd scripts
-python step2_add_llava_descriptions.py --<category>
+Optional: python step2_add_llava_descriptions.py --<category>
 ```
 
 ## Knowledge Distillation
 ```bash
 cd ..
-bash run_distillation_by_category.sh --<category>
+bash run_distillation_by_category.sh <category>
 ```
 
 ## Prompt tuning
 ```bash
 cd ..
-bash run_prompt.sh --<category>
+bash run_prompt.sh <category>
 ```
 
 ## Gating
