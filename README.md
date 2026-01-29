@@ -40,7 +40,7 @@ bash run_prompt.sh <category>
 Go through the codes in MoLoRA_Gating_lllm.ipynb.
 
 ## Getting results
-Go through the codes in MoLoRA_Gating_lllm.ipynb.
+Go through the codes in testeavl.ipynb.
 
 
 
